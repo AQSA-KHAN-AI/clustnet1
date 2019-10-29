@@ -1,0 +1,143 @@
+---
+title: "EM problem"
+author: "Gordana Popovic"
+date: "19 March 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+library(mixtools)
+library(CVXR)
+```
+
+
+Generate data
+
+```{r}
+lam=c(4,10,1)
+Y <- c(rpois(20, lambda = lam[1]),
+       rpois(10, lambda = lam[2]),
+       rpois(10, lambda = lam[3]))
+# hist(Y,20)
+N=length(Y)
+```
+
+The I use mixtools EM algorithm to find clusters. I imitialize using kmeans, I seem to remeber Shirley saying that works pretty well.
+
+```{r}
+K=9
+
+#k_mens for initial centres
+init_clust <- kmeans(Y, K)
+
+#estimate model
+X=matrix(1,N,1)
+init_beta=matrix(init_clust$centers,1,K)
+outEM=poisregmixEM(Y,X ,beta =init_beta ,addintercept = FALSE)
+tau=outEM$posterior
+```
+
+
+
+```{r}
+loss_fun_poiss=function(beta,Y,tau){
+  N=length(Y)
+  out=0
+  for(i in 1:N){
+      out=out+sum(tau[i,]*(beta*Y[i]-exp(beta)))
+  }
+  out
+}
+```
+
+Test by seing if I get the same answer with optim and with CVXR.
+
+```{r}
+optim_res=optim(outEM$beta,loss_fun_poiss,Y=Y,tau=tau)
+
+beta <- Variable(K)
+obj <- loss_fun_poiss(beta,Y,tau)
+prob <- Problem(Minimize(obj))
+result <- solve(prob)
+
+cbind(sort(result$getValue(beta)),sort(optim_res$par),sort(outEM$beta))
+```
+
+Now I add a penalty
+```{r}
+lasso_reg <- function(beta, lambda = 0,w=NULL) {
+  K=beta@rows
+  out=0
+  if(is.null(w)){
+    w=matrix(1,K,K)
+  }
+  for(k in 1:(K-1)){
+    out=out+p_norm(w[k,(k+1):K]*(beta[k]-beta[(k+1):K]),1)
+  }
+  lambda * out
+}
+```
+
+
+Group version?
+```{r}
+lasso_reg_gp <- function(beta, lambda = 0,w=NULL) {
+  K=beta@rows
+  out=0
+  if(is.null(w)){
+    w=matrix(1,K,K)
+  }
+  for(k in 1:(K-1)){
+    #the second column of beta is sigma
+    out=out+p_norm(w[k,(k+1):K]*((beta[k,1]-beta[(k+1):K,1])+(beta[k,2]-beta[(k+1):K,1]))^2,1)
+  }
+  lambda * out
+}
+
+loss_fun_gp=function(beta,Y,tau){
+  N=length(Y)
+  out=0
+  for(i in 1:N){
+      out=out+sum(tau[i,]*(Y[i]-beta[,1])^2*(1/(2*(beta[,2]^2)))+
+                    N*log(beta[,2]))
+      #funny specification is so it will work with cvxr, e.g. dnorm will not
+  }
+  out
+}
+```
+
+The I run a bunch of 
+
+```{r}
+beta=Variable(K)
+lambdas=exp((seq(0,9,length.out=20)))-1
+J=length(lambdas)
+loss=loss_fun(beta,Y,tau,sig=outEM$sigma)
+beta_out=matrix(NA,K,J)
+w=exp(-dist(init_clust$centers))
+w=as.matrix(w)
+
+for(j in 1:J){
+  obj <- loss +lasso_reg(beta, lambda=lambdas[j],w)
+  prob <- Problem(Minimize(obj))
+  result <- solve(prob,warm_start = TRUE)
+  beta_out[,j]=result$getValue(beta)
+}
+
+
+
+```
+
+
+```{r}
+plot(lambdas+1,beta_out[1,],type="l",ylim=c((min(mu)-2),(max(mu)+2)),log="x")
+for(j in 2:K){
+  lines(lambdas+1,beta_out[j,],type="l",col=j)
+}
+abline(h=mu,lty=2,col="red")
+```
+

@@ -1,0 +1,161 @@
+---
+title: "EM problem"
+author: "Gordana Popovic"
+date: "19 March 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+library(mixtools)
+library(CVXR)
+```
+
+
+I have a problem, I'm not properly undersanding the EM used to estimate mixture models I think. 
+
+So I'm using the `mixtools` package to initialize the lasso, like we talked about. First I generate some data.
+
+```{r}
+set.seed(1)
+hypermean=c(1,2,4)
+mean_val=rnorm(9,mean=rep(hypermean,each=3),sd=1)+1
+N.base=10
+ns=rep(c(N.base,N.base*2,N.base*3),each=3)
+means=rep(mean_val,times=ns)
+Y <- rnorm(length(means),mean = means,sd=1)
+N=length(Y)
+```
+
+The I use mixtools EM algorithm to find clusters. I imitialize using kmeans, I seem to remeber Shirley saying that works pretty well.
+
+```{r}
+K=9
+
+#k_mens for initial centres
+init_clust <- kmeans(Y, K)
+
+#estimate model
+outEM=normalmixEM(Y, mu = init_clust$centers,maxit = 10000)
+tau=outEM$posterior
+```
+
+So the way I understand this, the last iteration for the means, which I'm calling $\beta$, is obtained by maximising (we have gaussians)
+
+$$\Psi(\beta,\beta^{(t)})=\sum_{i=1}^N \sum_{k=1}^K \tau_{ik}^{(t)}\frac{(y_i-\beta_{k})^2}{2\sigma^{(t)2}}$$
+
+This is done using a weighted least squares, rather than a numerical optimisation routine, but nevertheless, you should get the same answer if you plug all that into optim
+
+```{r}
+loss_fun=function(beta,Y,tau,sig){
+  N=length(Y)
+  out=0
+  for(i in 1:N){
+      out=out+sum(tau[i,]*(Y[i]-beta)^2*(1/(2*(sig^2))))
+      #funny specification is so it will work with cvxr, e.g. dnorm will not
+  }
+  out
+}
+```
+
+Test by seing if I get the same answer with optim and with CVXR.
+
+```{r eval=FALSE, include=FALSE}
+st=outEM$mu+rnorm(9)
+optim_res=optim(st,loss_fun,Y=Y,tau=tau,sig=as.numeric(outEM$sigma))
+
+beta <- Variable(K)
+obj <- loss_fun(beta,Y,tau,as.numeric(outEM$sigma))
+prob <- Problem(Minimize(obj))
+result <- solve(prob)
+
+cbind(sort(outEM$mu),sort(result$getValue(beta)),sort(optim_res$par),sort(st))
+```
+
+Now I add a penalty
+```{r eval=FALSE, include=FALSE}
+lasso_reg <- function(beta, lambda = 0,w=NULL) {
+  K=beta@rows
+  out=0
+  if(is.null(w)){
+    w=matrix(1,K,K)
+  }
+  for(k in 1:(K-1)){
+    out=out+p_norm(w[k,(k+1):K]*(beta[k]-beta[(k+1):K]),1)
+  }
+  lambda * out
+}
+```
+
+
+Group version?
+```{r}
+lasso_reg_gp <- function(beta, lambda = 0,w=NULL) {
+  K=beta@rows
+  out=0
+  if(is.null(w)){
+    w=matrix(1,K,K)
+  }
+  for(k in 1:(K-1)){
+    #the second column of beta is sigma
+    out=out+p_norm(w[k,(k+1):K]*((beta[k,1]-beta[(k+1):K,1])+(beta[k,2]-beta[(k+1):K,1]))^2,1)
+  }
+  lambda * out
+}
+
+loss_fun_gp=function(beta,Y,tau){
+  N=length(Y)
+  out=0
+  for(i in 1:N){
+      out=out+sum(tau[i,]*(Y[i]-beta[,1])^2*(1/(2*(beta[,2]^2)))+
+                    N*log(beta[,2]))
+      #funny specification is so it will work with cvxr, e.g. dnorm will not
+  }
+  out
+}
+```
+
+The I run a bunch of lambdas
+
+```{r}
+beta=Variable(K)
+lambdas=exp((seq(2,10,length.out=20)))-1
+J=length(lambdas)
+loss=loss_fun(beta,Y,tau,sig=outEM$sigma)
+beta_out=matrix(NA,K,J)
+w=exp(-dist(init_clust$centers))
+w=as.matrix(w)
+
+obj <- loss +lasso_reg(beta, lambda=lambdas[1],w = NULL)
+prob <- Problem(Minimize(obj))
+result <- solve(prob,warm_start = FALSE)
+beta_out[,1]=result$getValue(beta)
+for(j in 2:J){
+  obj <- loss +lasso_reg(beta, lambda=lambdas[j],w = NULL)
+  prob <- Problem(Minimize(obj))
+  result <- solve(prob,warm_start = TRUE)
+  beta_out[,j]=result$getValue(beta)
+}
+
+
+
+```
+
+
+```{r}
+# beta_out=beta_out[,-1]
+# lambdas=lambdas[-1]
+minmax=range(beta_out)
+plot(lambdas,beta_out[1,],type="l",
+     ylim=c(minmax[1]-1,minmax[2]+1),log="x",lwd=2,
+     ylab="Group means",xlab = "lambda")
+for(j in 2:K){
+  lines(lambdas,beta_out[j,],type="l",col=j,lwd=2)
+}
+# abline(h=mean_val,lty=2,col="orange")
+# abline(h=hypermean,lty=2,col="red")
+```
+
